@@ -1,31 +1,17 @@
-import { Configuration, OpenAIApi } from "openai";
-
 export default async function handler(req, res) {
-  if (req.method === "POST") {
-    try {
-      const event = req.body.events?.[0];
-      const userMessage = event?.message?.text || "こんにちは";
+  try {
+    // リクエスト確認
+    console.log("Method:", req.method);
+    console.log("Headers:", req.headers);
+    console.log("Body:", req.body);
 
-      const openai = new OpenAIApi(
-        new Configuration({ apiKey: process.env.OPENAI_API_KEY })
-      );
-
-      const response = await openai.chat.completions.create({
-        model: "gpt-4o",
-        messages: [
-          { role: "system", content: "あなたは大学サポートbotです。" },
-          { role: "user", content: userMessage },
-        ],
-      });
-
-      const reply = response.data.choices[0].message.content;
-
-      res.status(200).json({ reply });
-    } catch (err) {
-      console.error("Error:", err);
-      res.status(500).json({ error: "Internal Server Error" });
+    if (req.method === "POST") {
+      res.status(200).json({ message: "POST received", body: req.body });
+    } else {
+      res.status(200).json({ message: "GET request working fine" });
     }
-  } else {
-    res.status(200).send("LINE Bot is running");
+  } catch (err) {
+    console.error("Error caught:", err);
+    res.status(500).json({ error: err.message });
   }
 }
