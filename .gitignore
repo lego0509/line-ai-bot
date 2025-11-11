@@ -1,0 +1,9 @@
+# 環境変数
+.env
+
+# node関連
+node_modules/
+
+# ログとかキャッシュとか
+*.log
+.DS_Store
