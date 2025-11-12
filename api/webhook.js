@@ -1,61 +1,25 @@
-import OpenAI from "openai";
 import fetch from "node-fetch";
 
-export const config = {
-  api: {
-    bodyParser: false,
-  },
-};
+export const config = { api: { bodyParser: false } };
 
 export default async function handler(req, res) {
-  console.log("✅ Webhook triggered:", req.method);
-
-  if (req.method !== "POST") {
-    return res.status(200).json({ message: "LINE Bot is running" });
-  }
+  console.log("✅ Webhook:", req.method);
+  if (req.method !== "POST") return res.status(200).json({ message: "RUNNING" });
 
   try {
     const body = await getRawBody(req);
     const data = JSON.parse(body.toString());
-    console.log("📩 Received data:", JSON.stringify(data, null, 2));
+    const event = data?.events?.[0];
 
-    res.status(200).end(); // 先にレスポンス返す（タイムアウト防止）
+    // すぐ200返す（LINEの10秒制限対策）
+    res.status(200).end();
 
-    const event = data.events?.[0];
-    if (!event) {
-      console.log("⚠️ No event found in body");
-      return;
-    }
-
+    if (!event) return console.log("⚠️ no event");
     const replyToken = event.replyToken;
-    const userMessage = event.message?.text;
-    console.log("💬 User message:", userMessage);
+    const text = event.message?.text || "（テスト）";
 
-    if (!userMessage) {
-      console.log("⚠️ No text message found");
-      return;
-    }
-
-    // OpenAI呼び出し
-    console.log("🚀 Sending request to OpenAI...");
-    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-    const completion = await openai.chat.completions.create({
-      model: "gpt-3.5-turbo",
-      messages: [
-        { role: "system", content: "あなたは大学生活支援Botです。" },
-        { role: "user", content: userMessage },
-      ],
-    });
-
-    const replyText =
-      completion.choices?.[0]?.message?.content ||
-      "うまく返答できませんでした。";
-
-    console.log("🤖 OpenAI reply:", replyText);
-
-    // LINEに返信
-    console.log("📤 Sending reply to LINE...");
-    const lineResponse = await fetch("https://api.line.me/v2/bot/message/reply", {
+    // 即時返信（OpenAIなし）
+    const r = await fetch("https://api.line.me/v2/bot/message/reply", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -63,19 +27,18 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify({
         replyToken,
-        messages: [{ type: "text", text: replyText }],
+        messages: [{ type: "text", text: `echo: ${text}` }],
       }),
     });
-
-    const lineResult = await lineResponse.text();
-    console.log("📦 LINE reply response:", lineResponse.status, lineResult);
-  } catch (err) {
-    console.error("💥 Error in webhook:", err);
+    const t = await r.text();
+    console.log("📦 LINE reply:", r.status, t);
+  } catch (e) {
+    console.error("💥 webhook error:", e);
   }
 }
 
 async function getRawBody(req) {
   const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
+  for await (const c of req) chunks.push(c);
   return Buffer.concat(chunks);
 }
