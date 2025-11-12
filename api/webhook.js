@@ -26,23 +26,34 @@ export default async function handler(req, res) {
     console.log("👤 userId:", userId);
     console.log("💬 userMessage:", userMessage);
 
-    res.status(200).end(); // 先にレスポンス返す
+    res.status(200).end(); // LINEに即返す
 
+    console.log("🚀 Sending request to OpenAI...");
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-    console.log("🚀 Requesting OpenAI...");
-    const completion = await openai.chat.completions.create({
-      model: "gpt-3.5-turbo",
-      messages: [
-        { role: "system", content: "あなたは大学生活支援Botです。" },
-        { role: "user", content: userMessage },
-      ],
-    });
+
+    let completion;
+    try {
+      completion = await openai.chat.completions.create({
+        model: "gpt-3.5-turbo",
+        messages: [
+          { role: "system", content: "あなたは大学生活支援Botです。" },
+          { role: "user", content: userMessage },
+        ],
+      });
+    } catch (openaiErr) {
+      console.error("💥 OpenAI API Error:", openaiErr);
+      return;
+    }
+
+    console.log("🧠 OpenAI raw completion:", JSON.stringify(completion, null, 2));
 
     const replyText =
       completion.choices?.[0]?.message?.content || "うまく返答できませんでした。";
-    console.log("🤖 OpenAI reply:", replyText);
+
+    console.log("🤖 replyText:", replyText);
 
     // push 送信
+    console.log("📡 Sending push message to LINE...");
     const response = await fetch("https://api.line.me/v2/bot/message/push", {
       method: "POST",
       headers: {
@@ -58,7 +69,7 @@ export default async function handler(req, res) {
     const resultText = await response.text();
     console.log("📦 LINE API response:", response.status, resultText);
   } catch (err) {
-    console.error("💥 Error in webhook:", err);
+    console.error("💥 General Error in webhook:", err);
   }
 }
 
