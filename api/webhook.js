@@ -44,17 +44,29 @@ export default async function handler(req, res) {
 
     const replyText = completion.choices[0].message.content || "うまく返答できませんでした。";
 
-    const lineResponse = await fetch("https://api.line.me/v2/bot/message/reply", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`,
-      },
-      body: JSON.stringify({
-        replyToken: event.replyToken,
-        messages: [{ type: "text", text: replyText }],
-      }),
-    });
+    try {
+      const lineResponse = await fetch("https://api.line.me/v2/bot/message/reply", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`,
+        },
+        body: JSON.stringify({
+          replyToken,
+          messages: [{ type: "text", text: replyText }],
+        }),
+      });
+    
+      console.log("📦 LINE reply status:", lineResponse.status);
+    
+      if (!lineResponse.ok) {
+        const errorText = await lineResponse.text();
+        console.error("LINE API error:", errorText);
+      }
+    } catch (err) {
+      console.error("💥 LINE reply failed:", err);
+    }
+
     
     const resultText = await lineResponse.text();
     console.log("📦 LINE reply:", lineResponse.status, resultText);
