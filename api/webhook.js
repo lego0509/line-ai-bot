@@ -20,30 +20,14 @@ export default async function handler(req, res) {
       return res.status(200).end();
     }
 
-    const replyToken = event.replyToken;
     const userId = event.source?.userId;
     const userMessage = event.message?.text;
+    res.status(200).end(); // まず200を即返す（LINE側タイムアウト防止）
 
-    // 即座に応答してLINEに「生きてる」と伝える
-    res.status(200).end();
-
-    // 仮メッセージ（返信トークン使用）
-    await fetch("https://api.line.me/v2/bot/message/reply", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`,
-      },
-      body: JSON.stringify({
-        replyToken,
-        messages: [{ type: "text", text: "考え中… 少し待ってね" }],
-      }),
-    });
-
-    // OpenAI呼び出し
+    // OpenAIへ問い合わせ
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     const completion = await openai.chat.completions.create({
-      model: "gpt-4o",
+      model: "gpt-3.5-turbo",
       messages: [
         { role: "system", content: "あなたは大学生活支援Botです。" },
         { role: "user", content: userMessage },
@@ -51,10 +35,9 @@ export default async function handler(req, res) {
     });
 
     const replyText =
-      completion.choices?.[0]?.message?.content ||
-      "うまく返答できませんでした。";
+      completion.choices?.[0]?.message?.content || "うまく返答できませんでした。";
 
-    // pushで送信（10秒制限なし）
+    // pushで返信（時間制限なし）
     await fetch("https://api.line.me/v2/bot/message/push", {
       method: "POST",
       headers: {
@@ -67,7 +50,7 @@ export default async function handler(req, res) {
       }),
     });
 
-    console.log("✅ Sent reply to user:", userId);
+    console.log("✅ Sent push message to user:", userId);
   } catch (err) {
     console.error("💥 Error in webhook:", err);
   }
