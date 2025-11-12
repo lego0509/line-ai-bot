@@ -22,10 +22,14 @@ export default async function handler(req, res) {
 
     const userId = event.source?.userId;
     const userMessage = event.message?.text;
-    res.status(200).end(); // まず200を即返す（LINE側タイムアウト防止）
 
-    // OpenAIへ問い合わせ
+    console.log("👤 userId:", userId);
+    console.log("💬 userMessage:", userMessage);
+
+    res.status(200).end(); // 先にレスポンス返す
+
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    console.log("🚀 Requesting OpenAI...");
     const completion = await openai.chat.completions.create({
       model: "gpt-3.5-turbo",
       messages: [
@@ -36,9 +40,10 @@ export default async function handler(req, res) {
 
     const replyText =
       completion.choices?.[0]?.message?.content || "うまく返答できませんでした。";
+    console.log("🤖 OpenAI reply:", replyText);
 
-    // pushで返信（時間制限なし）
-    await fetch("https://api.line.me/v2/bot/message/push", {
+    // push 送信
+    const response = await fetch("https://api.line.me/v2/bot/message/push", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -50,7 +55,8 @@ export default async function handler(req, res) {
       }),
     });
 
-    console.log("✅ Sent push message to user:", userId);
+    const resultText = await response.text();
+    console.log("📦 LINE API response:", response.status, resultText);
   } catch (err) {
     console.error("💥 Error in webhook:", err);
   }
