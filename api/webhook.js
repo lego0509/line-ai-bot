@@ -45,6 +45,10 @@ export default async function handler(req, res) {
     console.log("✅ Response sent successfully.");
   } catch (e) {
     console.error("💥 webhook error:", e);
+    console.log("📩 raw data:", JSON.stringify(data, null, 2));
+    console.log("🧩 event:", event);
+    console.log("🔑 replyToken:", event?.replyToken);
+
   }
 }
 
