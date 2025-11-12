@@ -30,7 +30,7 @@ export default async function handler(req, res) {
     // OpenAI呼び出し
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     const completion = await openai.chat.completions.create({
-      model: "gpt-3.5-turbo",
+      model: "gpt-4o",
       messages: [
         { role: "system", content: "あなたは大学生活支援Botです。" },
         { role: "user", content: userMessage },
