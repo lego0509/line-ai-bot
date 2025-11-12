@@ -2,26 +2,25 @@ import OpenAI from "openai";
 import fetch from "node-fetch";
 
 export default async function handler(req, res) {
+  if (req.method !== "POST") {
+    return res.status(200).json({ message: "LINE Bot is running" });
+  }
+
   try {
-    if (req.method !== "POST") {
-      return res.status(200).json({ message: "LINE Bot is running" });
-    }
+    // LINE側にすぐ応答
+    res.status(200).end();
 
-    let body = "";
-    await new Promise((resolve) => {
-      req.on("data", (chunk) => (body += chunk.toString()));
-      req.on("end", resolve);
-    });
-
-    const parsedBody = JSON.parse(body || "{}");
-    const event = parsedBody.events?.[0];
-    const userMessage = event?.message?.text || "";
+    const body = await getRawBody(req);
+    const event = JSON.parse(body.toString()).events?.[0];
+    const userMessage = event?.message?.text;
     const replyToken = event?.replyToken;
 
-    // OpenAI呼び出し
+    if (!userMessage || !replyToken) return;
+
+    // OpenAI応答生成
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     const completion = await openai.chat.completions.create({
-      model: "gpt-3.5-turbo",
+      model: "gpt-4o",
       messages: [
         { role: "system", content: "あなたは大学生活支援Botです。" },
         { role: "user", content: userMessage },
@@ -40,14 +39,17 @@ export default async function handler(req, res) {
         Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`,
       },
       body: JSON.stringify({
-        replyToken: replyToken,
+        replyToken,
         messages: [{ type: "text", text: replyText }],
       }),
     });
-
-    return res.status(200).json({ message: "Message sent to LINE" });
   } catch (err) {
     console.error("Error in webhook:", err);
-    return res.status(500).json({ error: err.message });
   }
+}
+
+async function getRawBody(req) {
+  const chunks = [];
+  for await (const chunk of req) chunks.push(chunk);
+  return Buffer.concat(chunks);
 }
