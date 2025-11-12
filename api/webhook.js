@@ -55,6 +55,9 @@ export default async function handler(req, res) {
         messages: [{ type: "text", text: replyText }],
       }),
     });
+    
+    const resultText = await lineResponse.text();
+    console.log("📦 LINE reply:", lineResponse.status, resultText);
 
     console.log("📦 LINE reply response:", lineResponse.status, await lineResponse.text());
   } catch (err) {
