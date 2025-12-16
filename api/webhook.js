@@ -1,3 +1,5 @@
+import "dotenv/config";
+
 import OpenAI from "openai";
 import fetch from "node-fetch";
 import crypto from "crypto";
