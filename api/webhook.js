@@ -13,6 +13,17 @@ export const config = { api: { bodyParser: false } };
 // Supabase（サーバ専用）
 // ※ service role key は絶対フロントに出さない
 // ==========================
+
+
+//テスト用
+console.log("[env-check] SUPABASE_URL defined:", !!process.env.SUPABASE_URL);
+console.log("[env-check] SERVICE_ROLE defined:", !!process.env.SUPABASE_SERVICE_ROLE_KEY);
+
+const k = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+console.log("[env-check] SERVICE_ROLE key length:", k.length);
+console.log("[env-check] SERVICE_ROLE key prefix:", k.slice(0, 10)); // 10文字だけ
+
+
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
