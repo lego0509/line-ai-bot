@@ -4,6 +4,7 @@ import OpenAI from "openai";
 import fetch from "node-fetch";
 import crypto from "crypto";
 import { createClient } from "@supabase/supabase-js";
+import { lineUserIdToHash } from "../lib/lineUserHash.js";
 
 // Next/Vercel(API Routes)で「raw body」を読むために bodyParser を切る
 // 署名検証は raw body（受信した本文そのまま）が必須なので、ここ重要。
@@ -14,7 +15,6 @@ export const config = { api: { bodyParser: false } };
 // ※ service role key は絶対フロントに出さない
 // ==========================
 
-
 //テスト用
 console.log("[env-check] SUPABASE_URL defined:", !!process.env.SUPABASE_URL);
 console.log("[env-check] SERVICE_ROLE defined:", !!process.env.SUPABASE_SERVICE_ROLE_KEY);
@@ -23,11 +23,7 @@ const k = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 console.log("[env-check] SERVICE_ROLE key length:", k.length);
 console.log("[env-check] SERVICE_ROLE key prefix:", k.slice(0, 10)); // 10文字だけ
 
-
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
 // ==========================
 // 小物関数たち
@@ -38,24 +34,11 @@ const supabase = createClient(
  * expected = base64(HMAC-SHA256(channelSecret, rawBody))
  */
 function verifyLineSignature(rawBodyBuffer, signatureBase64, channelSecret) {
-  const expected = crypto
-    .createHmac("sha256", channelSecret)
-    .update(rawBodyBuffer)
-    .digest("base64");
+  const expected = crypto.createHmac("sha256", channelSecret).update(rawBodyBuffer).digest("base64");
 
   // timing-safe compare（長さが違うと例外になるので先にチェック）
   if (signatureBase64.length !== expected.length) return false;
   return crypto.timingSafeEqual(Buffer.from(signatureBase64), Buffer.from(expected));
-}
-
-/**
- * LINE userId を DB保存用に匿名化
- * 推奨：HMAC-SHA256(pepper, userId) のhex（64文字）
- * ※SHA256(userId + pepper) でも動くが、HMACの方が意図が明確で安全寄り
- */
-function lineUserIdToHash(lineUserId, pepper) {
-  console.log("[webhook] raw userId:", lineUserId);
-  return crypto.createHmac("sha256", pepper).update(lineUserId, "utf8").digest("hex");
 }
 
 /**
@@ -321,8 +304,8 @@ export default async function handler(req, res) {
       if (!lineUserId) continue;
 
       // 5) LINE userId をハッシュ化（pepperはサーバにだけ置く）
-      const pepper = process.env.LINE_HASH_PEPPER || ""; // ←環境変数名はこれに統一推奨
-      const lineUserHash = lineUserIdToHash(lineUserId, pepper);
+      console.log("[webhook] raw userId:", lineUserId);
+      const lineUserHash = lineUserIdToHash(lineUserId);
 
       // 6) users upsert して userId(UUID)を確保
       let userId;
@@ -341,7 +324,7 @@ export default async function handler(req, res) {
         } catch (e) {
           console.error("💥 ensureUserMemory error:", e);
         }
-        // followは返信不要（返信したいならpush APIが必要。replyTokenはfollowでも来るが運用方針次第）
+        // followは返信不要
         continue;
       }
 
@@ -379,17 +362,13 @@ export default async function handler(req, res) {
       try {
         const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
 
-        // systemは固定（ここは卒研の説明に使える）
         const systemMsg =
           "あなたは大学生活支援AIです。ユーザーの個人特定につながる情報は推測しない。短く明確に答える。";
 
-        // memory（長期記憶）を system に混ぜるのがラク
-        const memoryMsg =
-          mem?.summary_1000?.trim()
-            ? `【ユーザー長期メモ（要約）】\n${mem.summary_1000.trim()}`
-            : "【ユーザー長期メモ（要約）】\n(まだ要約なし)";
+        const memoryMsg = mem?.summary_1000?.trim()
+          ? `【ユーザー長期メモ（要約）】\n${mem.summary_1000.trim()}`
+          : "【ユーザー長期メモ（要約）】\n(まだ要約なし)";
 
-        // 会話ログを OpenAI 形式へ変換
         const chatMsgs = recent.map((m) => ({
           role: m.role,
           content: m.content,
@@ -423,7 +402,7 @@ export default async function handler(req, res) {
         console.error("💥 replyLine error:", e);
       }
 
-      // 15) 20件ごとに summary_1000 を更新（失敗しても影響小なので最後に回す）
+      // 15) 20件ごとに summary_1000 を更新
       try {
         await maybeUpdateUserSummary(openai, userId);
       } catch (e) {
@@ -435,7 +414,6 @@ export default async function handler(req, res) {
     return res.status(200).end();
   } catch (err) {
     console.error("💥 Fatal webhook error:", err);
-    // LINEには2xx返す方が安定することが多い（再送地獄回避）
     return res.status(200).end();
   }
 }
