@@ -54,6 +54,7 @@ function verifyLineSignature(rawBodyBuffer, signatureBase64, channelSecret) {
  * ※SHA256(userId + pepper) でも動くが、HMACの方が意図が明確で安全寄り
  */
 function lineUserIdToHash(lineUserId, pepper) {
+  console.log("[webhook] raw userId:", lineUserId);
   return crypto.createHmac("sha256", pepper).update(lineUserId, "utf8").digest("hex");
 }
 
