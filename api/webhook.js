@@ -279,10 +279,24 @@ function getBaseUrl(req) {
  * - 45秒でタイムアウト（replyToken対策）
  */
 async function callAskApi(req, lineUserId, message) {
-  const base = getBaseUrl(req) || process.env.APP_BASE_URL;
-  if (!base) throw new Error("base url not found (set APP_BASE_URL or ensure host headers exist)");
+  // ① まず env を最優先（これが一番安定）
+  const base =
+    process.env.ASK_API_URL || // 例: "https://xxx.vercel.app/api/ask" を直指定でもOK
+    process.env.APP_BASE_URL || // 例: "https://xxx.vercel.app"
+    (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : null) ||
+    getBaseUrl(req);
 
-  const url = `${base}/api/ask`;
+  if (!base) throw new Error("base url not found (set APP_BASE_URL or ASK_API_URL)");
+
+  // ② ASK_API_URL を直指定した場合はそれを使う
+  const url = process.env.ASK_API_URL
+    ? process.env.ASK_API_URL
+    : `${base}/api/ask`;
+
+  const payload = {
+    line_user_id: lineUserId,
+    message,
+  };
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 45000);
@@ -290,19 +304,33 @@ async function callAskApi(req, lineUserId, message) {
   try {
     const r = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json; charset=utf-8" },
-      body: JSON.stringify({ line_user_id: lineUserId, message }),
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+      },
+      body: JSON.stringify(payload),
       signal: controller.signal,
     });
 
-    const json = await r.json().catch(() => null);
+    // ★失敗理由を必ず見える化：text→JSONパース
+    const text = await r.text();
+    let json = null;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      json = null;
+    }
 
     if (!r.ok) {
-      const msg = json?.error || `ask api failed: ${r.status}`;
-      throw new Error(msg);
+      const detail = json?.error ? `${json.error}` : text.slice(0, 300);
+      console.error("[callAskApi] failed", { url, status: r.status, detail, payload_preview: { has_line_user_id: !!lineUserId, msg_len: (message || "").length } });
+      throw new Error(`ask api ${r.status}: ${detail}`);
     }
+
     if (!json?.ok) {
-      throw new Error(json?.error || "ask api returned ok=false");
+      const detail = json?.error || "ask api returned ok=false";
+      console.error("[callAskApi] ok=false", { url, detail, json });
+      throw new Error(detail);
     }
 
     return json.answer || "（回答が空でした）";
@@ -310,6 +338,7 @@ async function callAskApi(req, lineUserId, message) {
     clearTimeout(timeout);
   }
 }
+
 
 /**
  * 通常会話（DB検索しない雑談側）
