@@ -6,7 +6,7 @@ import crypto from "crypto";
 import { createClient } from "@supabase/supabase-js";
 import { lineUserIdToHash } from "../lib/lineUserHash.js";
 
-// Next.js (pages/api) で raw body を読むために bodyParser を切る
+// Next/Vercel(API Routes)で「raw body」を読むために bodyParser を切る
 export const config = { api: { bodyParser: false } };
 
 // ==========================
@@ -28,19 +28,23 @@ function verifyLineSignature(rawBodyBuffer, signatureBase64, channelSecret) {
   return crypto.timingSafeEqual(Buffer.from(signatureBase64), Buffer.from(expected));
 }
 
-/** raw body を読む（Bufferで返す） */
+/**
+ * raw body を読む（Bufferで返す）
+ */
 async function getRawBody(req) {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
   return Buffer.concat(chunks);
 }
 
-/** LINEへ返信する（replyTokenは短命なので最優先で返す） */
+/**
+ * LINEへ返信する
+ */
 async function replyLine(replyToken, text) {
   await fetch("https://api.line.me/v2/bot/message/reply", {
     method: "POST",
     headers: {
-      "Content-Type": "application/json",
+      "Content-Type": "application/json; charset=utf-8",
       Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`,
     },
     body: JSON.stringify({
@@ -50,7 +54,9 @@ async function replyLine(replyToken, text) {
   });
 }
 
-/** users を upsert して user_id(UUID) を返す */
+/**
+ * users を upsert して user_id(UUID) を返す
+ */
 async function upsertUserAndGetId(lineUserHash) {
   const { data, error } = await supabase
     .from("users")
@@ -64,8 +70,6 @@ async function upsertUserAndGetId(lineUserHash) {
 
 /**
  * user_memory を初期化（存在しなければ作成）
- * - summary_1000 は空文字でOK
- * - last_summarized_at は now() でOK（初期状態で差分が溜まらないように）
  */
 async function ensureUserMemory(userId) {
   const { data: mem, error: memErr } = await supabase
@@ -90,7 +94,9 @@ async function ensureUserMemory(userId) {
   return created;
 }
 
-/** chat_messages に1件保存（失敗しても返信は止めない） */
+/**
+ * chat_messages に1件保存
+ */
 async function insertChatMessage(userId, role, content) {
   const { error } = await supabase.from("chat_messages").insert({
     user_id: userId,
@@ -100,7 +106,9 @@ async function insertChatMessage(userId, role, content) {
   if (error) console.error("💥 chat_messages insert error:", error);
 }
 
-/** 直近N件の会話ログを取る（user/assistant のみ） */
+/**
+ * 直近N件の会話ログを取る（user/assistant のみ推奨）
+ */
 async function getRecentChatMessages(userId, limit = 20) {
   const { data, error } = await supabase
     .from("chat_messages")
@@ -114,7 +122,9 @@ async function getRecentChatMessages(userId, limit = 20) {
   return (data ?? []).reverse();
 }
 
-/** 「前回要約以降」のメッセージが何件あるか */
+/**
+ * 「前回要約以降」のメッセージが何件あるか
+ */
 async function countNewMessagesSinceSummary(userId) {
   const { data: mem, error: memErr } = await supabase
     .from("user_memory")
@@ -124,19 +134,23 @@ async function countNewMessagesSinceSummary(userId) {
 
   if (memErr) throw memErr;
 
+  const last = mem.last_summarized_at;
+
   const { count, error } = await supabase
     .from("chat_messages")
     .select("id", { count: "exact", head: true })
     .eq("user_id", userId)
     .in("role", ["user", "assistant"])
-    .gt("created_at", mem.last_summarized_at);
+    .gt("created_at", last);
 
   if (error) throw error;
   return count ?? 0;
 }
 
-/** 「差分ログ」を取る（前回要約以降） */
-async function getDeltaMessagesSinceSummary(userId, max = 60) {
+/**
+ * 「差分ログ」を取る（前回要約以降）
+ */
+async function getDeltaMessagesSinceSummary(userId, max = 40) {
   const { data: mem, error: memErr } = await supabase
     .from("user_memory")
     .select("last_summarized_at")
@@ -160,14 +174,11 @@ async function getDeltaMessagesSinceSummary(userId, max = 60) {
 
 /**
  * summary_1000 を差分方式で更新
- * old_summary + delta_messages -> new_summary（1000文字程度）
- *
- * 注意: replyTokenの期限が短いので「返信後」に実行する
  */
 async function maybeUpdateUserSummary(openai, userId) {
   const newCount = await countNewMessagesSinceSummary(userId);
 
-  // 20件未満なら更新しない（方針）
+  // 20件未満なら更新しない（君の方針）
   if (newCount < 20) return;
 
   const { data: mem, error: memErr } = await supabase
@@ -180,6 +191,7 @@ async function maybeUpdateUserSummary(openai, userId) {
 
   const oldSummary = mem.summary_1000 ?? "";
   const delta = await getDeltaMessagesSinceSummary(userId, 60);
+
   if (delta.length === 0) return;
 
   const prompt = [
@@ -200,7 +212,7 @@ async function maybeUpdateUserSummary(openai, userId) {
 
   let newSummary = oldSummary;
   try {
-    const model = process.env.OPENAI_MODEL_SUMMARY || process.env.OPENAI_MODEL || "gpt-5-mini";
+    const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
     const r = await openai.chat.completions.create({
       model,
       messages: prompt,
@@ -222,27 +234,58 @@ async function maybeUpdateUserSummary(openai, userId) {
   if (updErr) console.error("💥 user_memory update error:", updErr);
 }
 
+/** =========================
+ * ここから “DB検索(ask)” 統合
+ * ========================= */
+
 /**
- * このWebhook自身が稼働している “同一ホスト” 上の /api/ask を叩くためのベースURLを作る
- * - Vercel: x-forwarded-proto / host が入る
- * - local: http://localhost:3000
+ * どの質問を /api/ask に回すか（雑でもOK。足りなければ後で足す）
+ */
+function shouldUseAsk(userMessage) {
+  const t = (userMessage || "").toLowerCase();
+  const keywords = [
+    "授業",
+    "科目",
+    "講義",
+    "おすすめ",
+    "レビュー",
+    "満足",
+    "おすすめ度",
+    "難易度",
+    "出席",
+    "課題",
+    "単位",
+    "落と",
+    "ランキング",
+    "トップ",
+    "平均",
+    "シラバス",
+  ];
+  return keywords.some((k) => t.includes(k));
+}
+
+/**
+ * このリクエストの host/proto から自分のベースURLを作る（同一ドメイン内の /api/ask を叩く用）
  */
 function getBaseUrl(req) {
-  const proto = req.headers["x-forwarded-proto"] || "http";
+  const proto = req.headers["x-forwarded-proto"] || "https";
   const host = req.headers["x-forwarded-host"] || req.headers.host;
+  if (!host) return null;
   return `${proto}://${host}`;
 }
 
 /**
- * /api/ask を呼ぶ（Function CallingでDB参照できる回答を生成）
- * - 返信が1分制限なので、タイムアウトも仕込む（遅いときはfallback）
+ * /api/ask を叩いて “DB根拠の回答” を取得
+ * - 45秒でタイムアウト（replyToken対策）
  */
 async function callAskApi(req, lineUserId, message) {
-  const url = `${getBaseUrl(req)}/api/ask`;
+  const base = getBaseUrl(req) || process.env.APP_BASE_URL;
+  if (!base) throw new Error("base url not found (set APP_BASE_URL or ensure host headers exist)");
+
+  const url = `${base}/api/ask`;
 
   const controller = new AbortController();
-  const timeoutMs = 45_000; // 45秒で諦めてfallback（replyToken保護）
-  const t = setTimeout(() => controller.abort(), timeoutMs);
+  const timeout = setTimeout(() => controller.abort(), 45000);
 
   try {
     const r = await fetch(url, {
@@ -252,45 +295,40 @@ async function callAskApi(req, lineUserId, message) {
       signal: controller.signal,
     });
 
-    const json = await r.json().catch(() => ({}));
+    const json = await r.json().catch(() => null);
+
     if (!r.ok) {
-      return { ok: false, error: json?.error || `ask api failed (HTTP ${r.status})` };
+      const msg = json?.error || `ask api failed: ${r.status}`;
+      throw new Error(msg);
     }
-    return json; // { ok:true, user_id, answer }
+    if (!json?.ok) {
+      throw new Error(json?.error || "ask api returned ok=false");
+    }
+
+    return json.answer || "（回答が空でした）";
   } finally {
-    clearTimeout(t);
+    clearTimeout(timeout);
   }
 }
 
 /**
- * /api/ask が失敗したとき用の fallback（DB検索なしの雑談）
- * - これで最低限は返信できる（replyToken期限対策）
+ * 通常会話（DB検索しない雑談側）
  */
-async function fallbackChat(openai, memSummary, recent, userMessage) {
-  const model = process.env.OPENAI_MODEL || "gpt-5-mini";
+async function createChatReply(openai, mem, recent) {
+  const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
 
   const systemMsg =
-    "あなたは大学生活支援AIです。短く明確に答える。分からないことは分からないと言う。";
+    "あなたは大学生活支援AIです。ユーザーの個人特定につながる情報は推測しない。短く明確に答える。";
 
-  const memoryMsg = memSummary?.trim()
-    ? `【ユーザー長期メモ（要約）】\n${memSummary.trim()}`
+  const memoryMsg = mem?.summary_1000?.trim()
+    ? `【ユーザー長期メモ（要約）】\n${mem.summary_1000.trim()}`
     : "【ユーザー長期メモ（要約）】\n(まだ要約なし)";
 
   const chatMsgs = (recent || []).map((m) => ({ role: m.role, content: m.content }));
 
-  // 直近ログの末尾が同じメッセージなら二重投入を避ける
-  const last = recent?.[recent.length - 1];
-  const appendUser =
-    !(last && last.role === "user" && (last.content ?? "").trim() === userMessage.trim());
-
   const completion = await openai.chat.completions.create({
     model,
-    messages: [
-      { role: "system", content: systemMsg },
-      { role: "system", content: memoryMsg },
-      ...chatMsgs,
-      ...(appendUser ? [{ role: "user", content: userMessage }] : []),
-    ],
+    messages: [{ role: "system", content: systemMsg }, { role: "system", content: memoryMsg }, ...chatMsgs],
   });
 
   return completion.choices?.[0]?.message?.content?.trim() || "うまく返答できませんでした。";
@@ -300,7 +338,6 @@ async function fallbackChat(openai, memSummary, recent, userMessage) {
 // メイン（Webhook）
 // ==========================
 export default async function handler(req, res) {
-  // LINEはWebhookに 2xx を返さないと再送したりするので、基本は200で返す
   if (req.method !== "POST") {
     return res.status(200).json({ message: "LINE Bot running" });
   }
@@ -309,7 +346,7 @@ export default async function handler(req, res) {
     // 1) raw body取得（署名検証用）
     const rawBody = await getRawBody(req);
 
-    // 2) 署名検証（ここを省くと誰でも叩けるWebhookになる）
+    // 2) 署名検証
     const channelSecret = process.env.LINE_CHANNEL_SECRET || "";
     const signature = req.headers["x-line-signature"];
 
@@ -322,30 +359,31 @@ export default async function handler(req, res) {
       return res.status(401).end();
     }
 
-    // 3) JSONパース（ここまで来たらパースしてOK）
+    // 3) JSONパース
     const data = JSON.parse(rawBody.toString("utf8"));
     const events = data.events || [];
 
-    // OpenAIクライアント（fallback＆要約更新で使用）
+    // OpenAIクライアント（雑談/要約で使用）
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-    // 4) eventごとに処理（複数来ることがある）
+    // 4) eventごとに処理
     for (const event of events) {
       const lineUserId = event.source?.userId;
       if (!lineUserId) continue;
 
+      // 5) LINE userId をハッシュ化
       const lineUserHash = lineUserIdToHash(lineUserId);
 
-      // users upsert して内部 userId(UUID)を確保
+      // 6) users upsert して userId(UUID)を確保
       let userId;
       try {
         userId = await upsertUserAndGetId(lineUserHash);
       } catch (e) {
         console.error("💥 users upsert error:", e);
-        continue; // DB死んでたらこのeventは諦める（LINEには200返す）
+        continue;
       }
 
-      // follow（友だち追加）は登録だけ
+      // 7) follow（友だち追加）イベントなら「登録だけ」して終了
       if (event.type === "follow") {
         try {
           await ensureUserMemory(userId);
@@ -355,13 +393,13 @@ export default async function handler(req, res) {
         continue;
       }
 
-      // messageイベント（テキスト以外は無視）
+      // 8) messageイベント（テキスト以外は無視）
       if (event.type !== "message" || !event.message?.text) continue;
 
       const userMessage = event.message.text;
       const replyToken = event.replyToken;
 
-      // user_memory確保（要約が無くても作る）
+      // 9) user_memory を確保し、summary_1000 を取得
       let mem;
       try {
         mem = await ensureUserMemory(userId);
@@ -370,46 +408,43 @@ export default async function handler(req, res) {
         mem = { summary_1000: "", last_summarized_at: new Date().toISOString() };
       }
 
-      // まずユーザー発言を保存（/api/ask が直近ログを読むので “先に保存” が大事）
+      // 10) ユーザー発言を保存
       await insertChatMessage(userId, "user", userMessage);
 
-      // 直近ログ（fallback用にも使う）
-      let recent = [];
-      try {
-        recent = await getRecentChatMessages(userId, 20);
-      } catch (e) {
-        console.error("💥 getRecentChatMessages error:", e);
-      }
-
-      // 返信生成：基本は /api/ask（DB参照可能）
+      // 11) 返信生成（ここが今回の追加ポイント）
       let replyText = "";
-      try {
-        const ask = await callAskApi(req, lineUserId, userMessage);
 
-        if (ask?.ok && typeof ask.answer === "string") {
-          replyText = ask.answer;
+      try {
+        // A) 授業/科目系 → /api/ask に回してDB根拠の回答
+        if (shouldUseAsk(userMessage)) {
+          replyText = await callAskApi(req, lineUserId, userMessage);
         } else {
-          // /api/ask が失敗したら fallback
-          console.error("💥 ask api error:", ask?.error);
-          replyText = await fallbackChat(openai, mem?.summary_1000, recent, userMessage);
+          // B) 雑談 → いままで通り（会話ログ＋要約を使う）
+          let recent = [];
+          try {
+            recent = await getRecentChatMessages(userId, 20);
+          } catch (e) {
+            console.error("💥 getRecentChatMessages error:", e);
+          }
+          replyText = await createChatReply(openai, mem, recent);
         }
       } catch (e) {
-        // タイムアウト/abort 等もここに入る
-        console.error("💥 ask api fatal:", e);
-        replyText = await fallbackChat(openai, mem?.summary_1000, recent, userMessage);
+        console.error("💥 reply generation error:", e);
+        replyText =
+          "今ちょっと処理が混み合ってるか、検索に時間がかかっています。大学名と科目名をもう少し具体的にして、もう一度送ってください。";
       }
 
-      // AI返答も保存（会話継続のため必須）
+      // 12) AI返答も保存
       await insertChatMessage(userId, "assistant", replyText);
 
-      // LINE返信（replyTokenは短命なのでここが最優先）
+      // 13) LINE返信（必ず返す）
       try {
         await replyLine(replyToken, replyText);
       } catch (e) {
         console.error("💥 replyLine error:", e);
       }
 
-      // 要約更新（返信後に実行：replyToken期限対策）
+      // 14) 20件ごとに summary_1000 を更新（今まで通り）
       try {
         await maybeUpdateUserSummary(openai, userId);
       } catch (e) {
@@ -420,7 +455,6 @@ export default async function handler(req, res) {
     return res.status(200).end();
   } catch (err) {
     console.error("💥 Fatal webhook error:", err);
-    // LINEには2xx返す（再送地獄回避）
     return res.status(200).end();
   }
 }
