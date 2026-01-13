@@ -10,6 +10,19 @@ import { lineUserIdToHash } from "../lib/lineUserHash.js";
 export const config = { api: { bodyParser: false } };
 
 // ==========================
+// ENV（必須）
+// ==========================
+// SUPABASE_URL
+// SUPABASE_SERVICE_ROLE_KEY
+// LINE_CHANNEL_SECRET
+// LINE_CHANNEL_ACCESS_TOKEN
+// OPENAI_API_KEY
+// （任意）OPENAI_MODEL          : 雑談と要約更新に使うモデル（例 gpt-4o-mini）
+// （必須）ASK_API_URL           : 例 https://review-page-gules.vercel.app/api/ask
+// （任意）ASK_TIMEOUT_MS        : /api/ask タイムアウト(ms) 既定 45000
+// （任意）DEBUG_WEBHOOK         : 1 でログ多め
+
+// ==========================
 // Supabase（サーバ専用）
 // ==========================
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
@@ -191,7 +204,6 @@ async function maybeUpdateUserSummary(openai, userId) {
 
   const oldSummary = mem.summary_1000 ?? "";
   const delta = await getDeltaMessagesSinceSummary(userId, 60);
-
   if (delta.length === 0) return;
 
   const prompt = [
@@ -234,16 +246,18 @@ async function maybeUpdateUserSummary(openai, userId) {
   if (updErr) console.error("💥 user_memory update error:", updErr);
 }
 
-/** =========================
- * ここから “DB検索(ask)” 統合
- * ========================= */
+// ==========================
+// ここから “DB検索(ask)” 統合
+// ==========================
 
 /**
  * どの質問を /api/ask に回すか（雑でもOK。足りなければ後で足す）
+ * ※「大学/授業/おすすめ/難しい/単位/出席/課題/ランキング」系は ask へ
  */
 function shouldUseAsk(userMessage) {
   const t = (userMessage || "").toLowerCase();
   const keywords = [
+    "大学",
     "授業",
     "科目",
     "講義",
@@ -254,65 +268,44 @@ function shouldUseAsk(userMessage) {
     "難易度",
     "出席",
     "課題",
+    "レポート",
     "単位",
     "落と",
     "ランキング",
     "トップ",
     "平均",
-    "シラバス",
+    "就活",
+    "企業",
+    "インターン",
   ];
   return keywords.some((k) => t.includes(k));
-}
-
-/**
- * このリクエストの host/proto から自分のベースURLを作る（同一ドメイン内の /api/ask を叩く用）
- */
-function getBaseUrl(req) {
-  const proto = req.headers["x-forwarded-proto"] || "https";
-  const host = req.headers["x-forwarded-host"] || req.headers.host;
-  if (!host) return null;
-  return `${proto}://${host}`;
 }
 
 /**
  * /api/ask を叩いて “DB根拠の回答” を取得
  * - 45秒でタイムアウト（replyToken対策）
  */
-async function callAskApi(req, lineUserId, message) {
-  // ① まず env を最優先（これが一番安定）
-  const base =
-    process.env.ASK_API_URL || // 例: "https://xxx.vercel.app/api/ask" を直指定でもOK
-    process.env.APP_BASE_URL || // 例: "https://xxx.vercel.app"
-    (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : null) ||
-    getBaseUrl(req);
+async function callAskApi(lineUserId, message) {
+  const url = process.env.ASK_API_URL;
+  if (!url) throw new Error("ASK_API_URL is not set");
 
-  if (!base) throw new Error("base url not found (set APP_BASE_URL or ASK_API_URL)");
-
-  // ② ASK_API_URL を直指定した場合はそれを使う
-  const url = process.env.ASK_API_URL
-    ? process.env.ASK_API_URL
-    : `${base}/api/ask`;
-
-  const payload = {
-    line_user_id: lineUserId,
-    message,
-  };
+  const payload = { line_user_id: lineUserId, message };
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 45000);
+  const timeoutMs = Number(process.env.ASK_TIMEOUT_MS || 45000);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const r = await fetch(url, {
       method: "POST",
       headers: {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
+        "Content-Type": "application/json; charset=utf-8",
+        Accept: "application/json",
       },
       body: JSON.stringify(payload),
       signal: controller.signal,
     });
 
-    // ★失敗理由を必ず見える化：text→JSONパース
     const text = await r.text();
     let json = null;
     try {
@@ -323,7 +316,12 @@ async function callAskApi(req, lineUserId, message) {
 
     if (!r.ok) {
       const detail = json?.error ? `${json.error}` : text.slice(0, 300);
-      console.error("[callAskApi] failed", { url, status: r.status, detail, payload_preview: { has_line_user_id: !!lineUserId, msg_len: (message || "").length } });
+      console.error("[callAskApi] failed", {
+        url,
+        status: r.status,
+        detail,
+        payload_preview: { has_line_user_id: !!lineUserId, msg_len: (message || "").length },
+      });
       throw new Error(`ask api ${r.status}: ${detail}`);
     }
 
@@ -333,12 +331,12 @@ async function callAskApi(req, lineUserId, message) {
       throw new Error(detail);
     }
 
-    return json.answer || "（回答が空でした）";
+    const answer = (json.answer || "").trim();
+    return answer.length ? answer : "（回答が空でした）";
   } finally {
-    clearTimeout(timeout);
+    clearTimeout(timer);
   }
 }
-
 
 /**
  * 通常会話（DB検索しない雑談側）
@@ -367,6 +365,7 @@ async function createChatReply(openai, mem, recent) {
 // メイン（Webhook）
 // ==========================
 export default async function handler(req, res) {
+  // LINEはWebhookに 2xx を返さないと再送するので、基本は200運用に寄せる
   if (req.method !== "POST") {
     return res.status(200).json({ message: "LINE Bot running" });
   }
@@ -428,6 +427,10 @@ export default async function handler(req, res) {
       const userMessage = event.message.text;
       const replyToken = event.replyToken;
 
+      if (process.env.DEBUG_WEBHOOK === "1") {
+        console.log("[webhook] message:", { userId, text: userMessage });
+      }
+
       // 9) user_memory を確保し、summary_1000 を取得
       let mem;
       try {
@@ -440,13 +443,14 @@ export default async function handler(req, res) {
       // 10) ユーザー発言を保存
       await insertChatMessage(userId, "user", userMessage);
 
-      // 11) 返信生成（ここが今回の追加ポイント）
+      // 11) 返信生成（DB検索 ask 統合）
       let replyText = "";
 
       try {
-        // A) 授業/科目系 → /api/ask に回してDB根拠の回答
+        // A) 授業/科目/大学系 → /api/ask に回してDB根拠の回答
         if (shouldUseAsk(userMessage)) {
-          replyText = await callAskApi(req, lineUserId, userMessage);
+          if (process.env.DEBUG_WEBHOOK === "1") console.log("[webhook] -> ask");
+          replyText = await callAskApi(lineUserId, userMessage);
         } else {
           // B) 雑談 → いままで通り（会話ログ＋要約を使う）
           let recent = [];
@@ -458,9 +462,20 @@ export default async function handler(req, res) {
           replyText = await createChatReply(openai, mem, recent);
         }
       } catch (e) {
+        // ★ここで ask 失敗が出てたはず。ログを濃くして原因追えるようにする
         console.error("💥 reply generation error:", e);
-        replyText =
-          "今ちょっと処理が混み合ってるか、検索に時間がかかっています。大学名と科目名をもう少し具体的にして、もう一度送ってください。";
+
+        // DB検索が必要な質問で落ちた場合は、雑談で“ごまかす”より明示的にエラー返す（幻覚防止）
+        if (shouldUseAsk(userMessage)) {
+          replyText =
+            "DB検索に失敗しました。\n" +
+            "・大学名（正式名称）\n" +
+            "・科目名（できれば正式名称）\n" +
+            "を含めて、もう一度送ってください。";
+        } else {
+          replyText =
+            "今AIが混み合っているか、利用制限に達しています。少し時間を置いてもう一度送ってください。";
+        }
       }
 
       // 12) AI返答も保存
@@ -481,9 +496,11 @@ export default async function handler(req, res) {
       }
     }
 
+    // LINEには2xx返す
     return res.status(200).end();
   } catch (err) {
     console.error("💥 Fatal webhook error:", err);
+    // LINE再送を避けたいので 200
     return res.status(200).end();
   }
 }
